@@ -6,6 +6,6 @@ pub enum OciRegistryError {
     ReqwestError(#[from] reqwest::Error),
     #[error("registry error")]
     RegistryError(oci_spec::distribution::ErrorResponse),
-    #[error("unknown error")]
-    Unknown,
+    #[error("authentication error")]
+    AuthenticationError,
 }

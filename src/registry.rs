@@ -46,7 +46,7 @@ impl Registry {
         let response = self.client.execute(request).await?;
 
         if response.status().as_u16() != 200 {
-            return Err(OciRegistryError::Unknown);
+            return Err(OciRegistryError::AuthenticationError);
         }
 
         let token = response
@@ -96,7 +96,7 @@ impl Registry {
                         self.refresh_token(www_auth_header.to_str().unwrap())
                             .await?;
                     } else {
-                        return Err(OciRegistryError::Unknown);
+                        return Err(OciRegistryError::AuthenticationError);
                     }
                 }
 
