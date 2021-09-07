@@ -1,4 +1,7 @@
-use oci_spec::{distribution::ErrorResponse, image::ImageManifest};
+use oci_spec::{
+    distribution::ErrorResponse,
+    image::{ImageIndex, ImageManifest},
+};
 use reqwest::{Client, Request};
 
 use crate::{error::OciRegistryError, media_type, www_auth::WWWAuth};
@@ -114,6 +117,49 @@ impl Registry {
         return match self.pull_manifest_no_retry(image, tag, true).await {
             Ok(manifest) => Ok(manifest),
             Err(_) => self.pull_manifest_no_retry(image, tag, false).await,
+        };
+    }
+
+    async fn pull_index_no_retry(
+        &mut self,
+        image: &str,
+        tag: &str,
+        refresh_token: bool,
+    ) -> Result<ImageIndex, OciRegistryError> {
+        let request = self.get_request(
+            format!("{}/{}/manifests/{}", self.base_url, image, tag).as_str(),
+            media_type::INDEX,
+        )?;
+
+        let response = self.client.execute(request).await?;
+        let response_code = response.status().as_u16();
+
+        return match response_code {
+            200 => Ok(response.json::<ImageIndex>().await?),
+            _ => {
+                if response_code == 401 && refresh_token {
+                    if let Some(www_auth_header) = response.headers().get("WWW-Authenticate") {
+                        self.refresh_token(www_auth_header.to_str().unwrap())
+                            .await?;
+                    } else {
+                        return Err(OciRegistryError::AuthenticationError);
+                    }
+                }
+
+                let error_response = response.json::<ErrorResponse>().await?;
+                Err(OciRegistryError::RegistryError(error_response))
+            }
+        };
+    }
+
+    pub async fn pull_index(
+        &mut self,
+        image: &str,
+        tag: &str,
+    ) -> Result<ImageIndex, OciRegistryError> {
+        return match self.pull_index_no_retry(image, tag, true).await {
+            Ok(index) => Ok(index),
+            Err(_) => self.pull_index_no_retry(image, tag, false).await,
         };
     }
 }
