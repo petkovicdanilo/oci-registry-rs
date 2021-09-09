@@ -16,4 +16,6 @@ pub enum OciRegistryError {
     InvalidDigest(String),
     #[error("oci-spec error")]
     OciSpecError(#[from] oci_spec::OciSpecError),
+    #[error("unknown error")]
+    UnknownError,
 }

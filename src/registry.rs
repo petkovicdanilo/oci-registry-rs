@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use oci_spec::{
-    distribution::{ErrorResponse, TagList},
+    distribution::{ErrorResponse, RepositoryList, TagList},
     image::{Arch, ImageConfiguration, ImageIndex, ImageIndexBuilder, ImageManifest, Os},
 };
 use reqwest::{header::HeaderValue, Client, Request, Response};
@@ -358,6 +358,16 @@ impl Registry {
             Ok(tags) => Ok(tags),
             Err(_) => self.list_tags_no_retry(image, false).await,
         };
+    }
+
+    pub async fn catalog(&self) -> Result<RepositoryList, OciRegistryError> {
+        let request = self.get_request(format!("{}/_catalog", self.base_url).as_str(), "*/*")?;
+        let response = self.client.execute(request).await?;
+
+        match response.status().as_u16() {
+            200 => Ok(response.json::<RepositoryList>().await?),
+            _ => Err(OciRegistryError::UnknownError),
+        }
     }
 
     pub async fn pull_image(
