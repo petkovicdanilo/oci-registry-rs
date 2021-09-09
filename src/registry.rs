@@ -4,7 +4,7 @@ use oci_spec::{
     distribution::{ErrorResponse, TagList},
     image::{Arch, ImageConfiguration, ImageIndex, ImageManifest, Os},
 };
-use reqwest::{header::HeaderValue, Client, Request};
+use reqwest::{header::HeaderValue, Client, Request, Response};
 use tokio::{
     fs::{create_dir, File},
     io::AsyncWriteExt,
@@ -104,12 +104,12 @@ impl Registry {
         )
     }
 
-    async fn pull_manifest_no_retry(
+    async fn pull_raw_manifest_no_retry(
         &mut self,
         image: &str,
         tag: &str,
         refresh_token: bool,
-    ) -> Result<ImageManifest, OciRegistryError> {
+    ) -> Result<String, OciRegistryError> {
         let request = self.get_request(
             format!("{}/{}/manifests/{}", self.base_url, image, tag).as_str(),
             media_type::MANIFEST,
@@ -119,7 +119,7 @@ impl Registry {
         let response_code = response.status().as_u16();
 
         return match response_code {
-            200 => Ok(response.json::<ImageManifest>().await?),
+            200 => Ok(response.text().await?),
             _ => {
                 if response_code == 401 && refresh_token {
                     self.refresh_token(response.headers().get("WWW-Authenticate"))
@@ -130,6 +130,30 @@ impl Registry {
                 Err(OciRegistryError::RegistryError(error_response))
             }
         };
+    }
+
+    pub async fn pull_raw_manifest(
+        &mut self,
+        image: &str,
+        tag: &str,
+    ) -> Result<String, OciRegistryError> {
+        return match self.pull_raw_manifest_no_retry(image, tag, true).await {
+            Ok(raw_manifest) => Ok(raw_manifest),
+            Err(_) => self.pull_raw_manifest_no_retry(image, tag, false).await,
+        };
+    }
+
+    async fn pull_manifest_no_retry(
+        &mut self,
+        image: &str,
+        tag: &str,
+        refresh_token: bool,
+    ) -> Result<ImageManifest, OciRegistryError> {
+        let raw_manifest = self
+            .pull_raw_manifest_no_retry(image, tag, refresh_token)
+            .await?;
+
+        Ok(serde_json::from_str(&raw_manifest)?)
     }
 
     pub async fn pull_manifest(
@@ -182,19 +206,28 @@ impl Registry {
         };
     }
 
-    async fn pull_configuration_no_retry(
+    async fn configuration_response(
+        &self,
+        image: &str,
+        digest: &str,
+    ) -> Result<Response, OciRegistryError> {
+        let request = self.request_from_digest(image, digest, media_type::CONFIGURATION)?;
+        let response = self.client.execute(request).await?;
+
+        Ok(response)
+    }
+
+    async fn pull_raw_configuration_no_retry(
         &mut self,
         image: &str,
         digest: &str,
         refresh_token: bool,
-    ) -> Result<ImageConfiguration, OciRegistryError> {
-        let request = self.request_from_digest(image, digest, media_type::CONFIGURATION)?;
-
-        let response = self.client.execute(request).await?;
+    ) -> Result<String, OciRegistryError> {
+        let response = self.configuration_response(image, digest).await?;
         let response_code = response.status().as_u16();
 
         return match response_code {
-            200 => Ok(response.json::<ImageConfiguration>().await?),
+            200 => Ok(response.text().await?),
             _ => {
                 if response_code == 401 && refresh_token {
                     self.refresh_token(response.headers().get("WWW-Authenticate"))
@@ -205,6 +238,36 @@ impl Registry {
                 Err(OciRegistryError::RegistryError(error_response))
             }
         };
+    }
+
+    pub async fn pull_raw_configuration(
+        &mut self,
+        image: &str,
+        digest: &str,
+    ) -> Result<String, OciRegistryError> {
+        return match self
+            .pull_raw_configuration_no_retry(image, digest, true)
+            .await
+        {
+            Ok(raw_configuration) => Ok(raw_configuration),
+            Err(_) => {
+                self.pull_raw_configuration_no_retry(image, digest, false)
+                    .await
+            }
+        };
+    }
+
+    async fn pull_configuration_no_retry(
+        &mut self,
+        image: &str,
+        digest: &str,
+        refresh_token: bool,
+    ) -> Result<ImageConfiguration, OciRegistryError> {
+        let raw_configuration = self
+            .pull_raw_configuration_no_retry(image, digest, refresh_token)
+            .await?;
+
+        Ok(serde_json::from_str(&raw_configuration)?)
     }
 
     pub async fn pull_configuration(
@@ -337,6 +400,8 @@ impl Registry {
             })
             .ok_or(OciRegistryError::AuthenticationError)?
             .digest();
+        let raw_manifest = self.pull_raw_manifest(image, tag).await?;
+        let manifest: ImageManifest = serde_json::from_str(&raw_manifest)?;
         let (alg, manifest_digest) = split_digest(manifest_digest)?;
         let alg_path = blobs_path.join(alg);
 
@@ -350,7 +415,7 @@ impl Registry {
             .await?;
 
         let config_digest = manifest.config().digest();
-        let config = self.pull_configuration(image, config_digest).await?;
+        let raw_config = self.pull_raw_configuration(image, config_digest).await?;
         let (alg, config_digest) = split_digest(config_digest)?;
         let alg_path = blobs_path.join(alg);
 
@@ -360,12 +425,12 @@ impl Registry {
 
         File::create(alg_path.join(config_digest))
             .await?
-            .write_all(serde_json::to_string(&config)?.as_bytes())
+            .write_all(raw_config.as_bytes())
             .await?;
 
         for layer in manifest.layers() {
-            let digest = layer.digest();
-            let (alg, _) = split_digest(digest)?;
+            let full_digest = layer.digest();
+            let (alg, digest) = split_digest(full_digest)?;
 
             let alg_path = blobs_path.join(alg);
 
