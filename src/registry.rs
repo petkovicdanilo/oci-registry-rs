@@ -12,13 +12,6 @@ use tokio::{
 
 use crate::{error::OciRegistryError, media_type, www_auth::WWWAuth};
 
-pub enum RegistryType {
-    Docker,
-    Quay,
-    Mcr,
-    Other { base_url: String },
-}
-
 pub struct Registry {
     base_url: String,
     client: Client,
