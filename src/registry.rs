@@ -2,7 +2,7 @@ use oci_spec::{
     distribution::ErrorResponse,
     image::{ImageConfiguration, ImageIndex, ImageManifest},
 };
-use reqwest::{Client, Request};
+use reqwest::{header::HeaderValue, Client, Request};
 
 use crate::{error::OciRegistryError, media_type, www_auth::WWWAuth};
 
@@ -38,33 +38,42 @@ impl Registry {
         }
     }
 
-    async fn refresh_token(&mut self, www_auth_header: &str) -> Result<(), OciRegistryError> {
-        let www_auth = WWWAuth::parse(www_auth_header);
+    async fn refresh_token(
+        &mut self,
+        www_auth_header: Option<&HeaderValue>,
+    ) -> Result<(), OciRegistryError> {
+        match www_auth_header {
+            Some(www_auth_header) => {
+                let www_auth_header = www_auth_header.to_str().unwrap();
+                let www_auth = WWWAuth::parse(www_auth_header);
 
-        let request = self
-            .client
-            .get(www_auth.realm)
-            .query(&www_auth.params)
-            .build()?;
-        let response = self.client.execute(request).await?;
+                let request = self
+                    .client
+                    .get(www_auth.realm)
+                    .query(&www_auth.params)
+                    .build()?;
+                let response = self.client.execute(request).await?;
 
-        if response.status().as_u16() != 200 {
-            return Err(OciRegistryError::AuthenticationError);
+                if response.status().as_u16() != 200 {
+                    return Err(OciRegistryError::AuthenticationError);
+                }
+
+                let token = response
+                    .json::<serde_json::Value>()
+                    .await?
+                    .as_object()
+                    .unwrap()
+                    .get("token")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                self.token = Some(token);
+
+                return Ok(());
+            }
+            None => return Err(OciRegistryError::AuthenticationError),
         }
-
-        let token = response
-            .json::<serde_json::Value>()
-            .await?
-            .as_object()
-            .unwrap()
-            .get("token")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
-        self.token = Some(token);
-
-        Ok(())
     }
 
     fn get_request(&self, url: &str, media_type: &str) -> Result<Request, OciRegistryError> {
@@ -107,12 +116,8 @@ impl Registry {
             200 => Ok(response.json::<ImageManifest>().await?),
             _ => {
                 if response_code == 401 && refresh_token {
-                    if let Some(www_auth_header) = response.headers().get("WWW-Authenticate") {
-                        self.refresh_token(www_auth_header.to_str().unwrap())
-                            .await?;
-                    } else {
-                        return Err(OciRegistryError::AuthenticationError);
-                    }
+                    self.refresh_token(response.headers().get("WWW-Authenticate"))
+                        .await?;
                 }
 
                 let error_response = response.json::<ErrorResponse>().await?;
@@ -150,12 +155,8 @@ impl Registry {
             200 => Ok(response.json::<ImageIndex>().await?),
             _ => {
                 if response_code == 401 && refresh_token {
-                    if let Some(www_auth_header) = response.headers().get("WWW-Authenticate") {
-                        self.refresh_token(www_auth_header.to_str().unwrap())
-                            .await?;
-                    } else {
-                        return Err(OciRegistryError::AuthenticationError);
-                    }
+                    self.refresh_token(response.headers().get("WWW-Authenticate"))
+                        .await?;
                 }
 
                 let error_response = response.json::<ErrorResponse>().await?;
@@ -190,12 +191,8 @@ impl Registry {
             200 => Ok(response.json::<ImageConfiguration>().await?),
             _ => {
                 if response_code == 401 && refresh_token {
-                    if let Some(www_auth_header) = response.headers().get("WWW-Authenticate") {
-                        self.refresh_token(www_auth_header.to_str().unwrap())
-                            .await?;
-                    } else {
-                        return Err(OciRegistryError::AuthenticationError);
-                    }
+                    self.refresh_token(response.headers().get("WWW-Authenticate"))
+                        .await?;
                 }
 
                 let error_response = response.json::<ErrorResponse>().await?;
