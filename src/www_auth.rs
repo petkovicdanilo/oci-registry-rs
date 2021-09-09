@@ -1,3 +1,4 @@
+use lazy_static::lazy_static;
 use regex::Regex;
 
 pub struct WWWAuth {
@@ -7,17 +8,22 @@ pub struct WWWAuth {
 
 impl WWWAuth {
     pub fn parse(text: &str) -> Self {
-        // TODO: lazy static
-        let realm_regex = Regex::new(r#"([\w\d\-]+) realm="([.\-\w\d/:]+)"(.+)"#).unwrap();
+        lazy_static! {
+            static ref REALM_REGEX: Regex =
+                Regex::new(r#"([\w\d\-]+) realm="([.\-\w\d/:]+)"(.+)"#).unwrap();
+        }
 
-        let captures = realm_regex.captures(text).unwrap();
+        let captures = REALM_REGEX.captures(text).unwrap();
 
         let realm = captures.get(2).unwrap().as_str().to_string();
-
         let params_text = captures.get(3).unwrap().as_str();
-        let params_regex = Regex::new(r#",([\w\d\-]+)="([.\-\w\d/:]+)""#).unwrap();
 
-        let params: Vec<(String, String)> = params_regex
+        lazy_static! {
+            static ref PARAMS_REGEX: Regex =
+                Regex::new(r#",([\w\d\-]+)="([.\-\w\d/:]+)""#).unwrap();
+        }
+
+        let params: Vec<(String, String)> = PARAMS_REGEX
             .captures_iter(params_text)
             .map(|c| {
                 (
