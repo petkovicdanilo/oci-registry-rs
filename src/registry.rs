@@ -26,13 +26,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(registry_type: RegistryType) -> Self {
-        let base_url = match registry_type {
-            RegistryType::Docker => String::from("https://registry-1.docker.io"),
-            RegistryType::Quay => String::from("https://quay.io"),
-            RegistryType::Mcr => String::from("https://mcr.microsoft.com"),
-            RegistryType::Other { base_url } => base_url,
-        };
+    pub fn new(base_url: &str) -> Self {
         let base_url = format!("{}/v2", base_url);
 
         let client = Client::new();
