@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-oci-spec = { version = "0.4", features = ["builder"] }
+oci-spec = { version = "0.5.1" }
 regex = "1"
 reqwest = { version = "0.11", features = ["json"] }
 serde_json = "1.0"

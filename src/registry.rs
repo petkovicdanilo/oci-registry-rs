@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use oci_spec::{
     distribution::{ErrorResponse, TagList},
-    image::{ImageConfiguration, ImageIndex, ImageManifest},
+    image::{Arch, ImageConfiguration, ImageIndex, ImageManifest, Os},
 };
 use reqwest::{header::HeaderValue, Client, Request};
 use tokio::{
@@ -232,9 +232,7 @@ impl Registry {
 
         return match response_code {
             200 => {
-                let (_, digest) = split_digest(digest)?;
-                let path = destination.join(digest).with_extension(".tar.gz");
-                File::create(path)
+                File::create(destination)
                     .await?
                     .write_all(&response.bytes().await?)
                     .await?;
@@ -326,8 +324,19 @@ impl Registry {
         let blobs_path = destination.join("blobs");
         create_dir(&blobs_path).await?;
 
-        let manifest_digest = index.manifests()[0].digest();
-        let manifest = self.pull_manifest(image, tag).await?;
+        let manifest_digest = index
+            .manifests()
+            .iter()
+            .find(|manifest| {
+                let platform = manifest.platform();
+                if let Some(platform) = platform {
+                    return platform.architecture() == &Arch::Amd64 && platform.os() == &Os::Linux;
+                }
+
+                return false;
+            })
+            .ok_or(OciRegistryError::AuthenticationError)?
+            .digest();
         let (alg, manifest_digest) = split_digest(manifest_digest)?;
         let alg_path = blobs_path.join(alg);
 
@@ -364,7 +373,8 @@ impl Registry {
                 create_dir(&alg_path).await?;
             }
 
-            self.pull_blob(image, digest, &alg_path).await?;
+            self.pull_blob(image, full_digest, &alg_path.join(digest))
+                .await?;
         }
 
         Ok(())
