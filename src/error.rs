@@ -8,4 +8,10 @@ pub enum OciRegistryError {
     RegistryError(oci_spec::distribution::ErrorResponse),
     #[error("authentication error")]
     AuthenticationError,
+    #[error("io operation error")]
+    IoError(#[from] std::io::Error),
+    #[error("serde error")]
+    SerdeError(#[from] serde_json::Error),
+    #[error("digest {0} is invalid")]
+    InvalidDigest(String),
 }

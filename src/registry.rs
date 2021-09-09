@@ -1,8 +1,14 @@
+use std::path::PathBuf;
+
 use oci_spec::{
-    distribution::ErrorResponse,
+    distribution::{ErrorResponse, TagList},
     image::{ImageConfiguration, ImageIndex, ImageManifest},
 };
 use reqwest::{header::HeaderValue, Client, Request};
+use tokio::{
+    fs::{create_dir, File},
+    io::AsyncWriteExt,
+};
 
 use crate::{error::OciRegistryError, media_type, www_auth::WWWAuth};
 
@@ -211,4 +217,162 @@ impl Registry {
             Err(_) => self.pull_configuration_no_retry(image, digest, false).await,
         };
     }
+
+    async fn pull_blob_no_retry(
+        &mut self,
+        image: &str,
+        digest: &str,
+        destination: &PathBuf,
+        refresh_token: bool,
+    ) -> Result<(), OciRegistryError> {
+        let request = self.request_from_digest(image, &digest, media_type::LAYER)?;
+
+        let response = self.client.execute(request).await?;
+        let response_code = response.status().as_u16();
+
+        return match response_code {
+            200 => {
+                let (_, digest) = split_digest(digest)?;
+                let path = destination.join(digest).with_extension(".tar.gz");
+                File::create(path)
+                    .await?
+                    .write_all(&response.bytes().await?)
+                    .await?;
+
+                return Ok(());
+            }
+            _ => {
+                if response_code == 401 && refresh_token {
+                    self.refresh_token(response.headers().get("WWW-Authenticate"))
+                        .await?;
+                }
+
+                let error_response = response.json::<ErrorResponse>().await?;
+                Err(OciRegistryError::RegistryError(error_response))
+            }
+        };
+    }
+
+    pub async fn pull_blob(
+        &mut self,
+        image: &str,
+        digest: &str,
+        destination: &PathBuf,
+    ) -> Result<(), OciRegistryError> {
+        return match self
+            .pull_blob_no_retry(image, digest, destination, true)
+            .await
+        {
+            Ok(blob) => Ok(blob),
+            Err(_) => {
+                self.pull_blob_no_retry(image, digest, destination, false)
+                    .await
+            }
+        };
+    }
+
+    async fn list_tags_no_retry(
+        &mut self,
+        image: &str,
+        refresh_token: bool,
+    ) -> Result<TagList, OciRegistryError> {
+        let request = self.get_request(
+            format!("{}/{}/tags/list", self.base_url, image).as_str(),
+            "*/*",
+        )?;
+
+        let response = self.client.execute(request).await?;
+        let response_code = response.status().as_u16();
+
+        return match response_code {
+            200 => Ok(response.json::<TagList>().await?),
+            _ => {
+                if response_code == 401 && refresh_token {
+                    self.refresh_token(response.headers().get("WWW-Authenticate"))
+                        .await?;
+                }
+
+                let error_response = response.json::<ErrorResponse>().await?;
+                Err(OciRegistryError::RegistryError(error_response))
+            }
+        };
+    }
+
+    pub async fn list_tags(&mut self, image: &str) -> Result<TagList, OciRegistryError> {
+        return match self.list_tags_no_retry(image, true).await {
+            Ok(tags) => Ok(tags),
+            Err(_) => self.list_tags_no_retry(image, false).await,
+        };
+    }
+
+    pub async fn pull_image(
+        &mut self,
+        image: &str,
+        tag: &str,
+        destination: &PathBuf,
+    ) -> Result<(), OciRegistryError> {
+        let oci_layout = r#"{"imageLayoutVersion": "1.0.0"}"#;
+        File::create(destination.join("oci-layout"))
+            .await?
+            .write_all(oci_layout.as_bytes())
+            .await?;
+
+        let index = self.pull_index(image, tag).await?;
+        File::create(destination.join("index.json"))
+            .await?
+            .write_all(serde_json::to_string(&index)?.as_bytes())
+            .await?;
+
+        let blobs_path = destination.join("blobs");
+        create_dir(&blobs_path).await?;
+
+        let manifest_digest = index.manifests()[0].digest();
+        let manifest = self.pull_manifest(image, tag).await?;
+        let (alg, manifest_digest) = split_digest(manifest_digest)?;
+        let alg_path = blobs_path.join(alg);
+
+        if !alg_path.exists() {
+            create_dir(&alg_path).await?;
+        }
+
+        File::create(alg_path.join(manifest_digest))
+            .await?
+            .write_all(serde_json::to_string(&manifest)?.as_bytes())
+            .await?;
+
+        let config_digest = manifest.config().digest();
+        let config = self.pull_configuration(image, config_digest).await?;
+        let (alg, config_digest) = split_digest(config_digest)?;
+        let alg_path = blobs_path.join(alg);
+
+        if !alg_path.exists() {
+            create_dir(&alg_path).await?;
+        }
+
+        File::create(alg_path.join(config_digest))
+            .await?
+            .write_all(serde_json::to_string(&config)?.as_bytes())
+            .await?;
+
+        for layer in manifest.layers() {
+            let digest = layer.digest();
+            let (alg, _) = split_digest(digest)?;
+
+            let alg_path = blobs_path.join(alg);
+
+            if !alg_path.exists() {
+                create_dir(&alg_path).await?;
+            }
+
+            self.pull_blob(image, digest, &alg_path).await?;
+        }
+
+        Ok(())
+    }
+}
+
+fn split_digest<'a>(digest: &'a str) -> Result<(&'a str, &'a str), OciRegistryError> {
+    digest
+        .split_once(":")
+        .ok_or(OciRegistryError::InvalidDigest(digest.to_string()))
 }
