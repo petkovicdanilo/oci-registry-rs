@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use oci_spec::{
     distribution::{ErrorResponse, TagList},
-    image::{Arch, ImageConfiguration, ImageIndex, ImageManifest, Os},
+    image::{Arch, ImageConfiguration, ImageIndex, ImageIndexBuilder, ImageManifest, Os},
 };
 use reqwest::{header::HeaderValue, Client, Request, Response};
 use tokio::{
@@ -379,6 +379,26 @@ impl Registry {
             .await?;
 
         let index = self.pull_index(image, tag).await?;
+        let manifest = index
+            .manifests()
+            .into_iter()
+            .find(|manifest| {
+                let platform = manifest.platform();
+                if let Some(platform) = platform {
+                    return platform.architecture() == &Arch::Amd64 && platform.os() == &Os::Linux;
+                }
+
+                return false;
+            })
+            .unwrap()
+            .clone();
+        let index = ImageIndexBuilder::default()
+            .annotations(index.annotations().clone().unwrap_or_default())
+            .manifests(vec![manifest])
+            .media_type(index.media_type().clone().unwrap())
+            .schema_version(index.schema_version())
+            .build()?;
+
         File::create(destination.join("index.json"))
             .await?
             .write_all(serde_json::to_string(&index)?.as_bytes())

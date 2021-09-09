@@ -14,4 +14,6 @@ pub enum OciRegistryError {
     SerdeError(#[from] serde_json::Error),
     #[error("digest {0} is invalid")]
     InvalidDigest(String),
+    #[error("oci-spec error")]
+    OciSpecError(#[from] oci_spec::OciSpecError),
 }
