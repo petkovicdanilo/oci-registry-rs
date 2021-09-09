@@ -374,6 +374,8 @@ impl Registry {
         &mut self,
         image: &str,
         tag: &str,
+        os: &Os,
+        arch: &Arch,
         destination: &PathBuf,
     ) -> Result<(), OciRegistryError> {
         let oci_layout = r#"{"imageLayoutVersion": "1.0.0"}"#;
@@ -389,16 +391,16 @@ impl Registry {
             .find(|manifest| {
                 let platform = manifest.platform();
                 if let Some(platform) = platform {
-                    return platform.architecture() == &Arch::Amd64 && platform.os() == &Os::Linux;
+                    return platform.architecture() == arch && platform.os() == os;
                 }
 
                 return false;
             })
-            .unwrap()
+            .ok_or(OciRegistryError::UnknownError)?
             .clone();
         let index = ImageIndexBuilder::default()
             .annotations(index.annotations().clone().unwrap_or_default())
-            .manifests(vec![manifest])
+            .manifests(vec![manifest.clone()])
             .media_type(index.media_type().clone().unwrap())
             .schema_version(index.schema_version())
             .build()?;
@@ -411,19 +413,7 @@ impl Registry {
         let blobs_path = destination.join("blobs");
         create_dir(&blobs_path).await?;
 
-        let manifest_digest = index
-            .manifests()
-            .iter()
-            .find(|manifest| {
-                let platform = manifest.platform();
-                if let Some(platform) = platform {
-                    return platform.architecture() == &Arch::Amd64 && platform.os() == &Os::Linux;
-                }
-
-                return false;
-            })
-            .ok_or(OciRegistryError::AuthenticationError)?
-            .digest();
+        let manifest_digest = manifest.digest();
         let raw_manifest = self.pull_raw_manifest(image, tag).await?;
         let manifest: ImageManifest = serde_json::from_str(&raw_manifest)?;
         let (alg, manifest_digest) = split_digest(manifest_digest)?;
