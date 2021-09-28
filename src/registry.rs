@@ -1,17 +1,20 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
+use futures::{future::join_all, StreamExt};
 use oci_spec::{
     distribution::{ErrorResponse, RepositoryList, TagList},
     image::{Arch, ImageConfiguration, ImageIndex, ImageIndexBuilder, ImageManifest, Os},
 };
 use reqwest::{header::HeaderValue, Client, Request, Response};
 use tokio::{
-    fs::{create_dir, File},
+    fs::{create_dir, create_dir_all, File},
     io::AsyncWriteExt,
+    task::JoinHandle,
 };
 
 use crate::{error::OciRegistryError, media_type, www_auth::WWWAuth};
 
+#[derive(Clone)]
 pub struct Registry {
     base_url: String,
     client: Client,
@@ -282,10 +285,13 @@ impl Registry {
 
         return match response_code {
             200 => {
-                File::create(destination)
-                    .await?
-                    .write_all(&response.bytes().await?)
-                    .await?;
+                let mut file = File::create(destination).await?;
+                let mut stream = response.bytes_stream();
+
+                while let Some(item) = stream.next().await {
+                    let chunk = item.unwrap();
+                    file.write(&chunk).await.unwrap();
+                }
 
                 return Ok(());
             }
@@ -371,6 +377,10 @@ impl Registry {
         arch: &Arch,
         destination: &PathBuf,
     ) -> Result<(), OciRegistryError> {
+        if !destination.exists() {
+            create_dir_all(&destination).await?;
+        }
+
         let oci_layout = r#"{"imageLayoutVersion": "1.0.0"}"#;
         File::create(destination.join("oci-layout"))
             .await?
@@ -435,19 +445,36 @@ impl Registry {
             .write_all(raw_config.as_bytes())
             .await?;
 
+        let mut tasks: Vec<JoinHandle<Result<(), OciRegistryError>>> = vec![];
+
+        let blobs_path = Arc::new(blobs_path.clone());
+        let image = Arc::new(image.to_string());
+
         for layer in manifest.layers() {
-            let full_digest = layer.digest();
-            let (alg, digest) = split_digest(full_digest)?;
+            let layer = layer.clone();
+            let blobs_path = blobs_path.clone();
+            let mut registry = self.clone();
+            let image = image.clone();
 
-            let alg_path = blobs_path.join(alg);
+            tasks.push(tokio::spawn(async move {
+                let full_digest = layer.digest();
+                let (alg, digest) = split_digest(full_digest)?;
 
-            if !alg_path.exists() {
-                create_dir(&alg_path).await?;
-            }
+                let alg_path = blobs_path.join(alg);
 
-            self.pull_blob(image, full_digest, &alg_path.join(digest))
-                .await?;
+                if !alg_path.exists() {
+                    create_dir(&alg_path).await?;
+                }
+
+                registry
+                    .pull_blob(&image, full_digest, &alg_path.join(digest))
+                    .await?;
+
+                Ok::<(), OciRegistryError>(())
+            }))
         }
+
+        join_all(tasks).await;
 
         Ok(())
     }
