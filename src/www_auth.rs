@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
 use regex::Regex;
 
+#[derive(Debug)]
 pub struct WWWAuth {
     pub realm: String,
     pub params: Vec<(String, String)>,
@@ -20,7 +21,7 @@ impl WWWAuth {
 
         lazy_static! {
             static ref PARAMS_REGEX: Regex =
-                Regex::new(r#",([\w\d\-]+)="([.\-\w\d/:]+)""#).unwrap();
+                Regex::new(r#",([\w\d\-]+)="([.\-\w\d/:\*]+)""#).unwrap();
         }
 
         let params: Vec<(String, String)> = PARAMS_REGEX
