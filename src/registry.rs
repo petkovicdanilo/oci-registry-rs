@@ -1,6 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use futures::{future::join_all, StreamExt};
+#[cfg(feature = "indicatif")]
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use oci_spec::{
     distribution::{RepositoryList, TagList},
     image::{Arch, ImageConfiguration, ImageIndex, ImageIndexBuilder, ImageManifest, Os},
@@ -149,6 +151,46 @@ impl Registry {
         Ok(serde_json::from_str(&raw_configuration)?)
     }
 
+    #[cfg(feature = "indicatif")]
+    pub async fn pull_layer_with_progress_bar(
+        &self,
+        image: &str,
+        digest: &str,
+        destination: &PathBuf,
+        progress_bar: ProgressBar,
+    ) -> Result<(), OciRegistryError> {
+        let url = self.blob_url(image, digest);
+        let token = self.get_token(&url).await?;
+        let headers = header_map(token.as_deref(), Some(media_type::LAYER));
+
+        let (mut blob_stream, length) = get_stream(url.as_str(), Some(headers)).await.unwrap();
+        let mut file = File::create(destination).await?;
+
+        progress_bar.set_length(length);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg}\n[{bar:50}] {bytes:9}/ {total_bytes}")
+                .progress_chars("#>-"),
+        );
+        progress_bar.set_message(format!("Downloading {}", digest));
+
+        let mut downloaded = 0;
+
+        while let Some(item) = blob_stream.next().await {
+            let chunk = item.unwrap();
+
+            downloaded = std::cmp::min(length, downloaded + chunk.len() as u64);
+            progress_bar.set_position(downloaded);
+
+            file.write(&chunk).await.unwrap();
+        }
+
+        progress_bar.set_message(format!("Downloaded {}", digest));
+        progress_bar.finish();
+
+        return Ok(());
+    }
+
     pub async fn pull_layer(
         &self,
         image: &str,
@@ -159,7 +201,7 @@ impl Registry {
         let token = self.get_token(&url).await?;
         let headers = header_map(token.as_deref(), Some(media_type::LAYER));
 
-        let mut blob_stream = get_stream(url.as_str(), Some(headers)).await.unwrap();
+        let (mut blob_stream, _) = get_stream(url.as_str(), Some(headers)).await.unwrap();
         let mut file = File::create(destination).await?;
 
         while let Some(item) = blob_stream.next().await {
@@ -293,10 +335,131 @@ impl Registry {
                     .await?;
 
                 Ok::<(), OciRegistryError>(())
-            }))
+            }));
         }
 
         join_all(tasks).await;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "indicatif")]
+    pub async fn pull_image_with_progress_bar(
+        &self,
+        image: &str,
+        tag: &str,
+        os: &Os,
+        arch: &Arch,
+        destination: &PathBuf,
+    ) -> Result<(), OciRegistryError> {
+        if !destination.exists() {
+            create_dir_all(&destination).await?;
+        }
+
+        let oci_layout = r#"{"imageLayoutVersion": "1.0.0"}"#;
+        File::create(destination.join("oci-layout"))
+            .await?
+            .write_all(oci_layout.as_bytes())
+            .await?;
+
+        let index = self.pull_index(image, tag).await?;
+        let manifest = index
+            .manifests()
+            .into_iter()
+            .find(|manifest| {
+                let platform = manifest.platform();
+                if let Some(platform) = platform {
+                    return platform.architecture() == arch && platform.os() == os;
+                }
+
+                return false;
+            })
+            .ok_or(OciRegistryError::UnknownError)?
+            .clone();
+        let index = ImageIndexBuilder::default()
+            .annotations(index.annotations().clone().unwrap_or_default())
+            .manifests(vec![manifest.clone()])
+            .media_type(index.media_type().clone().unwrap())
+            .schema_version(index.schema_version())
+            .build()?;
+
+        File::create(destination.join("index.json"))
+            .await?
+            .write_all(serde_json::to_string(&index)?.as_bytes())
+            .await?;
+
+        let blobs_path = destination.join("blobs");
+        create_dir(&blobs_path).await?;
+
+        let manifest_digest = manifest.digest();
+        let raw_manifest = self.pull_raw_manifest(image, tag).await?;
+        let manifest: ImageManifest = serde_json::from_str(&raw_manifest)?;
+        let (alg, manifest_digest) = split_digest(manifest_digest)?;
+        let alg_path = blobs_path.join(alg);
+
+        if !alg_path.exists() {
+            create_dir(&alg_path).await?;
+        }
+
+        File::create(alg_path.join(manifest_digest))
+            .await?
+            .write_all(serde_json::to_string(&manifest)?.as_bytes())
+            .await?;
+
+        let config_digest = manifest.config().digest();
+        let raw_config = self.pull_raw_configuration(image, config_digest).await?;
+        let (alg, config_digest) = split_digest(config_digest)?;
+        let alg_path = blobs_path.join(alg);
+
+        if !alg_path.exists() {
+            create_dir(&alg_path).await?;
+        }
+
+        File::create(alg_path.join(config_digest))
+            .await?
+            .write_all(raw_config.as_bytes())
+            .await?;
+
+        let mut tasks: Vec<JoinHandle<Result<(), OciRegistryError>>> = vec![];
+
+        let blobs_path = Arc::new(blobs_path.clone());
+        let image = Arc::new(image.to_string());
+
+        let multi = MultiProgress::new();
+
+        for layer in manifest.layers() {
+            let layer = layer.clone();
+            let blobs_path = blobs_path.clone();
+            let registry = self.clone();
+            let image = image.clone();
+            let progress_bar = multi.add(ProgressBar::new(layer.size() as u64));
+
+            tasks.push(tokio::spawn(async move {
+                let full_digest = layer.digest();
+                let (alg, digest) = split_digest(full_digest)?;
+
+                let alg_path = blobs_path.join(alg);
+
+                if !alg_path.exists() {
+                    create_dir(&alg_path).await?;
+                }
+
+                registry
+                    .pull_layer_with_progress_bar(
+                        &image,
+                        full_digest,
+                        &alg_path.join(digest),
+                        progress_bar,
+                    )
+                    .await?;
+
+                Ok::<(), OciRegistryError>(())
+            }));
+        }
+
+        let handle_m = tokio::task::spawn_blocking(move || multi.join().unwrap());
+        join_all(tasks).await;
+        handle_m.await.unwrap();
 
         Ok(())
     }

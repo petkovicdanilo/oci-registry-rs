@@ -70,7 +70,13 @@ pub async fn get_raw(url: &str, headers: Option<HeaderMap>) -> Result<String, St
 pub async fn get_stream(
     url: &str,
     headers: Option<HeaderMap>,
-) -> Result<impl futures_core::Stream<Item = reqwest::Result<Bytes>>, StatusCode> {
+) -> Result<
+    (
+        impl futures_core::Stream<Item = reqwest::Result<Bytes>>,
+        u64,
+    ),
+    StatusCode,
+> {
     let response = execute_request(url, headers).await;
 
     match &response {
@@ -89,7 +95,10 @@ pub async fn get_stream(
         }
     }
 
-    Ok(response.unwrap().bytes_stream())
+    let response = response.unwrap();
+    let content_length = response.content_length().unwrap();
+
+    Ok((response.bytes_stream(), content_length))
 }
 
 async fn execute_request(

@@ -7,6 +7,7 @@ edition = "2018"
 bytes = "1.1.0"
 futures = "0.3.17"
 futures-core = "0.3.17"
+indicatif = { version = "0.16.2", optional = true }
 lazy_static = "1.4.0"
 oci-spec = { version = "0.5.1" }
 regex = "1"
