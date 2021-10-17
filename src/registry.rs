@@ -18,6 +18,7 @@ use crate::{
     error::OciRegistryError,
     media_type,
     query_builder::{get, get_raw, get_stream, header_map},
+    token::AuthResponse,
     www_auth::WWWAuth,
 };
 
@@ -59,16 +60,7 @@ impl Registry {
                         return Err(OciRegistryError::AuthenticationError);
                     }
 
-                    let token = response
-                        .json::<serde_json::Value>()
-                        .await?
-                        .as_object()
-                        .unwrap()
-                        .get("token")
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_string();
+                    let token = response.json::<AuthResponse>().await?.token;
 
                     return Ok(Some(token));
                 }
