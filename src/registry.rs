@@ -25,22 +25,21 @@ use crate::{
 #[derive(Clone)]
 pub struct Registry {
     base_url: String,
-    client: Client,
 }
 
 impl Registry {
     pub fn new(base_url: &str) -> Self {
-        let base_url = format!("{}/v2", base_url);
-
-        let client = Client::new();
-
-        Self { base_url, client }
+        Self {
+            base_url: format!("{}/v2", base_url),
+        }
     }
 
     async fn get_token(&self, url: &str) -> Result<Option<String>, OciRegistryError> {
-        let request = self.client.head(url).build()?;
+        let client = Client::new();
 
-        let response = self.client.execute(request).await?;
+        let request = client.head(url).build()?;
+
+        let response = client.execute(request).await?;
         let response_code = response.status().as_u16();
 
         match response_code {
@@ -49,12 +48,8 @@ impl Registry {
                 if let Some(www_auth_header) = response.headers().get("WWW-Authenticate") {
                     let www_auth = WWWAuth::parse(www_auth_header.to_str().unwrap());
 
-                    let request = self
-                        .client
-                        .get(www_auth.realm)
-                        .query(&www_auth.params)
-                        .build()?;
-                    let response = self.client.execute(request).await?;
+                    let request = client.get(www_auth.realm).query(&www_auth.params).build()?;
+                    let response = client.execute(request).await?;
 
                     if response.status().as_u16() != 200 {
                         return Err(OciRegistryError::AuthenticationError);
